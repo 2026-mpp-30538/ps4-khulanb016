@@ -16,14 +16,14 @@ include-before-body:
       breaksymbolleft={},
       breaklines
     }
-output:
+execute:
   echo: false
-  eval: false
+  eval: true
 ---
 
 **Due 02/07 at 5:00PM Central.**
 
-"This submission is my work alone and complies with the 30538 integrity policy." Add your initials to indicate your agreement: \*\*\_\_\*\*
+"This submission is my work alone and complies with the 30538 integrity policy." Add your initials to indicate your agreement: K.B.
 
 ### Github Classroom Assignment Setup and Submission Instructions
 
@@ -56,14 +56,33 @@ import time
 import warnings 
 warnings.filterwarnings('ignore')
 alt.renderers.enable("png")
+
+import requests
+from bs4 import BeautifulSoup
 ```
 
-
 ## Step 1: Develop initial scraper and crawler
-
-
 ```{python}
+url = "https://oig.hhs.gov/fraud/enforcement/"
+base_url = "https://oig.hhs.gov"
 
+soup = BeautifulSoup(requests.get(url).text, "html.parser")
+
+data = []
+
+for card in soup.find_all("li", class_="usa-card"):
+    link_tag = card.find("h2", class_="usa-card__heading").find("a")
+    date_tag = card.find("span", class_="text-base-dark")
+
+    href = link_tag.get("href")
+    data.append({
+        "Title": link_tag.text.strip(),
+        "Date": date_tag.text.strip(),
+        "Link": base_url + href if href.startswith("/") else href
+    })
+
+df = pd.DataFrame(data)
+df.head()
 ```
 
 ## Step 2: Making the scraper dynamic
@@ -71,18 +90,73 @@ alt.renderers.enable("png")
 ### 1. Turning the scraper into a function 
 
 * a. Pseudo-Code
+1. Define a function that takes start_year and start_month as inputs.
+2. If start_year < 2013, print a warning message and exit the function.
+3. Initialize the base URL, page counter, and an empty list to store results.
+4. While enforcement actions are within the specified date range, scrape the current page.
+5. For each enforcement card, extract the title, date, and link and append valid entries to the results list.
+6. Stop the crawler once an enforcement action predates the input month and year.
+7. Increment the page counter and wait one second before requesting the next page.
+8. Convert the collected results into a DataFrame and save it as enforcement_actions_year_month.csv.
 
+Choice of loop: while loop, as the number of pages is unknown and the stopping condition depends on enforcement action dates. 
 
 * b. Create Dynamic Scraper
 
 ```{python}
+def scrape_enforcement_actions(start_year, start_month, run_scraper=False):
 
+    if start_year < 2013:
+        print("Please restrict to year >= 2013.")
+        return None
+
+    if not run_scraper:
+        return None
+
+    base_url = "https://oig.hhs.gov"
+    page = 1
+    data = []
+
+    while True:
+        soup = BeautifulSoup(
+            requests.get(f"{base_url}/fraud/enforcement/?page={page}").text,
+            "html.parser"
+        )
+
+        for card in soup.find_all("li", class_="usa-card"):
+            link_tag = card.find("h2", class_="usa-card__heading").find("a")
+            date = pd.to_datetime(card.find("span", class_="text-base-dark").text)
+
+            if (date.year < start_year) or (
+                date.year == start_year and date.month < start_month
+            ):
+                df = pd.DataFrame(data)
+                df.to_csv("enforcement_actions_year_month.csv", index=False)
+                return df
+
+            href = link_tag.get("href")
+            data.append({
+                "Title": link_tag.text.strip(),
+                "Date": date,
+                "Link": base_url + href if href.startswith("/") else href
+            })
+
+        page += 1
+        time.sleep(1)
 ```
 
 * c. Test Your Code
 
+The final dataframe contains 3,377 enforcement actions. The earliest enforcement action scraped is dated January 4, 2022.
 ```{python}
-
+df_2022 = scrape_enforcement_actions(
+    start_year=2022,
+    start_month=1,
+    run_scraper=True
+)
+```
+```{python}
+df_2022.sort_values("Date").head(1)
 ```
 
 ## Step 3: Plot data based on scraped data
@@ -90,7 +164,22 @@ alt.renderers.enable("png")
 ### 1. Plot the number of enforcement actions over time
 
 ```{python}
+df_2022 = pd.read_csv("enforcement_actions_year_month.csv")
+df_2022["Date"] = pd.to_datetime(df_2022["Date"])
+```
+```{python}
+df_2022["year_month"] = df_2022["Date"].dt.to_period("M").dt.to_timestamp()
 
+monthly_counts = (
+    df_2022.groupby("year_month")
+           .size()
+           .reset_index(name="num_actions")
+)
+
+alt.Chart(monthly_counts).mark_line().encode(
+    x="year_month:T",
+    y="num_actions:Q"
+)
 ```
 
 ### 2. Plot the number of enforcement actions categorized:
@@ -98,11 +187,55 @@ alt.renderers.enable("png")
 * based on "Criminal and Civil Actions" vs. "State Enforcement Agencies"
 
 ```{python}
+df_2022["agency_type"] = df_2022["Title"].str.lower().apply(
+    lambda t: "State Enforcement Agencies"
+    if ("state" in t or "attorney general" in t)
+    else "Criminal and Civil Actions"
+)
+```
+```{python}
+agency_monthly = (
+    df_2022.groupby(["year_month", "agency_type"])
+           .size()
+           .reset_index(name="num_actions")
+)
 
+alt.Chart(agency_monthly).mark_line().encode(
+    x="year_month:T",
+    y="num_actions:Q",
+    color="agency_type:N"
+)
 ```
 
 * based on five topics
 
 ```{python}
+cca = df_2022[df_2022["agency_type"] == "Criminal and Civil Actions"]
 
+def classify_topic(t):
+    t = t.lower()
+    if any(k in t for k in ["medicare", "medicaid", "health", "hospital", "physician"]):
+        return "Health Care Fraud"
+    if any(k in t for k in ["bank", "financial", "money laundering", "wire fraud"]):
+        return "Financial Fraud"
+    if any(k in t for k in ["drug", "opioid", "pharmacy"]):
+        return "Drug Enforcement"
+    if any(k in t for k in ["bribe", "bribery", "kickback", "corruption"]):
+        return "Bribery/Corruption"
+    return "Other"
+
+cca["topic"] = cca["Title"].apply(classify_topic)
+```
+```{python}
+topic_monthly = (
+    cca.groupby(["year_month", "topic"])
+       .size()
+       .reset_index(name="num_actions")
+)
+
+alt.Chart(topic_monthly).mark_line().encode(
+    x="year_month:T",
+    y="num_actions:Q",
+    color="topic:N"
+)
 ```
